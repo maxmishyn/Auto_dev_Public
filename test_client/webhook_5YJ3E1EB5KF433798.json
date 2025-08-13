@@ -1,0 +1,13 @@
+{
+  "lots": [
+    {
+      "lot_id": "5YJ3E1EB5KF433798",
+      "error": {
+        "message": "Error while downloading https://auto.dev/images/forsale/2025/07/25/10/14/2019_tesla_model_3-pic-5349291396617173745-1024x768.jpeg.",
+        "code": "processing_failed"
+      }
+    }
+  ],
+  "version": "1.0.0",
+  "signature": "e8346467e0d88bc39dbcd729e944f8fd1d398a2caf2e783c7e0d04ba2af25b75"
+}
