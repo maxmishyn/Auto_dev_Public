@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     # ——— Security ———
     shared_key: str
     # ——— Redis ———
-    redis_url: str = "redis://localhost:6379/0"
+    redis_url: str = "redis://redis:6379/0"
     # ——— Retries ———
     max_retries: int = 5
     base_delay: float = 2.0   # seconds
