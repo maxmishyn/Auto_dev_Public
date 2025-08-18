@@ -101,7 +101,8 @@ async def _handle_completed_batch_async(batch_id: str, status: str):
         if job_type == 'vision':
             for lot_id, html_en in results.items():
                 original_lot = custom_id_map.get(lot_id, {})
-                redis_client.set(f"result:{lot_id}:en", html_en)
+                # Store English result with 2-day TTL
+                redis_client.setex(f"result:{lot_id}:en", 172800, html_en)
                 for lang in original_lot.get('languages', []):
                     if lang != 'en':
                         task = {"custom_id": f"tr:{lot_id}:{lang}", "text": html_en, "lang": lang, "original_lot": original_lot}
@@ -112,7 +113,8 @@ async def _handle_completed_batch_async(batch_id: str, status: str):
             lot_results = {}
             for custom_id, translated_text in results.items():
                 _, lot_id, lang = custom_id.split(":")
-                redis_client.set(f"result:{lot_id}:{lang}", translated_text)
+                # Store translation result with 2-day TTL
+                redis_client.setex(f"result:{lot_id}:{lang}", 172800, translated_text)
                 
                 if lot_id not in lot_results:
                     lot_results[lot_id] = {'languages': [], 'original_lot': custom_id_map[custom_id]['original_lot']}
@@ -217,9 +219,9 @@ async def _process_single_lot_async(lot_data: dict):
         # 1. Generate English description using Vision API
         html_en = await _call_vision_direct(lot_data)
         
-        # Store English result
+        # Store English result with 2-day TTL
         lot_id = lot_data['lot_id']
-        redis_client.set(f"result:{lot_id}:en", html_en)
+        redis_client.setex(f"result:{lot_id}:en", 172800, html_en)
         
         # 2. Handle priority language (if specified)
         priority_language = lot_data.get('priority_language')
@@ -228,7 +230,8 @@ async def _process_single_lot_async(lot_data: dict):
         if priority_language and priority_language.lower() != 'en':
             # Translate to priority language immediately
             priority_translation = await _call_translate_direct(html_en, priority_language)
-            redis_client.set(f"result:{lot_id}:{priority_language}", priority_translation)
+            # Store priority translation with 2-day TTL
+            redis_client.setex(f"result:{lot_id}:{priority_language}", 172800, priority_translation)
             immediate_languages.append(priority_language)
         
         # 3. Send immediate webhook with English + priority language
