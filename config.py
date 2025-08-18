@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     # ——— Timeouts ———
     connect_timeout: float = 3.0
     read_timeout: float = 5.0
+    openai_timeout: int = 180  # 3 minutes 
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

@@ -8,14 +8,14 @@ from validators import assert_batch_limits
 client = AsyncOpenAI(
     base_url=settings.openai_base_url,
     api_key=settings.openai_api_key,
-    timeout=30,
+    timeout=settings.openai_timeout,
 )
 
 file_client = AsyncOpenAI(
     # Official base includes `/v1`; resource helpers send paths like "/files"
     base_url="https://api.openai.com/v1",
     api_key=settings.openai_api_key,
-    timeout=30,
+    timeout=settings.openai_timeout,
 )
 
 async def call_responses(body: dict) -> dict:
