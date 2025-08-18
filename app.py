@@ -25,9 +25,16 @@ async def health_check() -> dict[str, str]:
 async def generate_descriptions(req: RequestIn):
     """Generate car descriptions using OpenAI Vision and Translation APIs.
     
-    Single lot: Processed immediately via direct OpenAI API calls (no batch)
-    Multiple lots: Processed via batch system with Celery orchestration
-    Results delivered via webhook in both cases.
+    Single lot: 
+    - Processed immediately via direct OpenAI API calls (no batch)
+    - If 'language' field specified, returns EN + priority language immediately
+    - Remaining languages processed via batch system with subsequent webhooks
+    
+    Multiple lots: 
+    - Processed via batch system with Celery orchestration
+    - 'language' field ignored for multiple lots
+    
+    Results delivered via webhook in all cases.
     """
     
     # 1. Validate image URLs
@@ -45,7 +52,8 @@ async def generate_descriptions(req: RequestIn):
             "webhook": req.webhook.unicode_string(),
             "additional_info": lot.additional_info,
             "images": [{"url": img.url.unicode_string()} for img in lot.images],
-            "languages": req.languages
+            "languages": req.languages,
+            "priority_language": req.language  # Priority language for immediate response
         }
         process_single_lot_immediately.delay(lot_data)
         return {"status": "accepted", "message": "Single lot submitted for immediate processing"}
@@ -59,7 +67,8 @@ async def generate_descriptions(req: RequestIn):
                 "webhook": req.webhook.unicode_string(),
                 "additional_info": lot.additional_info,
                 "images": [{"url": img.url.unicode_string()} for img in lot.images],
-                "languages": req.languages
+                "languages": req.languages,
+                "priority_language": req.language  # Priority language (ignored for multiple lots)
             }
             lots_data.append(lot_data)
         

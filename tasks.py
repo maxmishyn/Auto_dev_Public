@@ -108,10 +108,19 @@ async def _handle_completed_batch_async(batch_id: str, status: str):
                         redis_client.rpush(TRANSLATE_PENDING_QUEUE, json.dumps(task))
                 _check_and_send_webhook_if_ready(lot_id, original_lot)
         elif job_type == 'translate':
+            # Collect all translation results for batch webhook
+            lot_results = {}
             for custom_id, translated_text in results.items():
                 _, lot_id, lang = custom_id.split(":")
                 redis_client.set(f"result:{lot_id}:{lang}", translated_text)
-                _check_and_send_webhook_if_ready(lot_id, custom_id_map[custom_id]['original_lot'])
+                
+                if lot_id not in lot_results:
+                    lot_results[lot_id] = {'languages': [], 'original_lot': custom_id_map[custom_id]['original_lot']}
+                lot_results[lot_id]['languages'].append(lang)
+            
+            # Send batch webhooks for completed translations
+            for lot_id, lot_info in lot_results.items():
+                _send_batch_webhook(lot_id, lot_info['original_lot'], lot_info['languages'])
 
     # 2. Обработка ОШИБОЧНЫХ результатов
     if batch.error_file_id:
@@ -140,18 +149,62 @@ async def _handle_completed_batch_async(batch_id: str, status: str):
 
     redis_client.delete(batch_key)
 
-def _check_and_send_webhook_if_ready(lot_id, original_lot):
-    languages = original_lot.get('languages', [])
-    if not languages:
-        return
-
+def _send_immediate_webhook(lot_id: str, lot_data: dict, languages: list[str]):
+    """Send immediate webhook with specified languages (EN + priority language)."""
     results = redis_client.mget([f"result:{lot_id}:{lang}" for lang in languages])
     if all(r is not None for r in results):
         descriptions = [{"language": lang, "damages": res.decode()} for lang, res in zip(languages, results)]
         response_lots = [LotOut(lot_id=lot_id, descriptions=[DamageDesc(**d) for d in descriptions]).model_dump()]
         signature = calc_signature(response_lots)
         out = ResponseOut(signature=signature, lots=response_lots).model_dump()
+        post_webhook_task.delay(lot_data['webhook'], out)
+        print(f"Sent immediate webhook for lot {lot_id} with languages: {languages}")
+
+def _send_batch_webhook(lot_id: str, original_lot: dict, batch_languages: list[str]):
+    """Send webhook with only batch-processed languages (excludes immediate languages)."""
+    # Filter out any immediate languages that were already sent
+    immediate_languages = original_lot.get('immediate_languages', [])
+    filtered_languages = [lang for lang in batch_languages if lang not in immediate_languages]
+    
+    if not filtered_languages:
+        print(f"No remaining languages to send for lot {lot_id} (all were immediate)")
+        return
+    
+    results = redis_client.mget([f"result:{lot_id}:{lang}" for lang in filtered_languages])
+    if all(r is not None for r in results):
+        descriptions = [{"language": lang, "damages": res.decode()} for lang, res in zip(filtered_languages, results)]
+        response_lots = [LotOut(lot_id=lot_id, descriptions=[DamageDesc(**d) for d in descriptions]).model_dump()]
+        signature = calc_signature(response_lots)
+        out = ResponseOut(signature=signature, lots=response_lots).model_dump()
         post_webhook_task.delay(original_lot['webhook'], out)
+        print(f"Sent batch webhook for lot {lot_id} with languages: {filtered_languages} (excluded immediate: {immediate_languages})")
+
+def _check_and_send_webhook_if_ready(lot_id, original_lot):
+    """Send webhook for batch processing (multi-lot) or when no immediate languages were sent."""
+    languages = original_lot.get('languages', [])
+    immediate_languages = original_lot.get('immediate_languages', [])
+    
+    # If this lot had immediate languages, only send remaining languages
+    if immediate_languages:
+        remaining_languages = [lang for lang in languages if lang not in immediate_languages]
+        if not remaining_languages:
+            return  # All languages were already sent immediately
+        languages_to_check = remaining_languages
+    else:
+        # Regular batch processing (multi-lot) - send all languages
+        languages_to_check = languages
+    
+    if not languages_to_check:
+        return
+
+    results = redis_client.mget([f"result:{lot_id}:{lang}" for lang in languages_to_check])
+    if all(r is not None for r in results):
+        descriptions = [{"language": lang, "damages": res.decode()} for lang, res in zip(languages_to_check, results)]
+        response_lots = [LotOut(lot_id=lot_id, descriptions=[DamageDesc(**d) for d in descriptions]).model_dump()]
+        signature = calc_signature(response_lots)
+        out = ResponseOut(signature=signature, lots=response_lots).model_dump()
+        post_webhook_task.delay(original_lot['webhook'], out)
+        print(f"Sent webhook for lot {lot_id} with languages: {languages_to_check}" + (f" (excluded immediate: {immediate_languages})" if immediate_languages else ""))
 
 @celery.task(name="tasks.process_single_lot_immediately")
 def process_single_lot_immediately(lot_data: dict):
@@ -168,21 +221,37 @@ async def _process_single_lot_async(lot_data: dict):
         lot_id = lot_data['lot_id']
         redis_client.set(f"result:{lot_id}:en", html_en)
         
-        # 2. Generate translations for other languages
-        languages = lot_data.get('languages', [])
-        other_langs = [lang for lang in languages if lang != 'en']
+        # 2. Handle priority language (if specified)
+        priority_language = lot_data.get('priority_language')
+        immediate_languages = ['en']  # Always include English
         
-        if other_langs:
-            # Parallel translation requests
-            translation_tasks = [_call_translate_direct(html_en, lang) for lang in other_langs]
-            translation_results = await asyncio.gather(*translation_tasks)
+        if priority_language and priority_language.lower() != 'en':
+            # Translate to priority language immediately
+            priority_translation = await _call_translate_direct(html_en, priority_language)
+            redis_client.set(f"result:{lot_id}:{priority_language}", priority_translation)
+            immediate_languages.append(priority_language)
+        
+        # 3. Send immediate webhook with English + priority language
+        _send_immediate_webhook(lot_id, lot_data, immediate_languages)
+        
+        # 4. Process remaining languages via batch if any
+        all_languages = lot_data.get('languages', [])
+        remaining_languages = [lang for lang in all_languages if lang.lower() not in [l.lower() for l in immediate_languages]]
+        
+        if remaining_languages:
+            # Submit remaining languages to batch processing
+            # Mark this lot as having immediate languages already sent
+            lot_data_with_immediate_info = lot_data.copy()
+            lot_data_with_immediate_info['immediate_languages'] = immediate_languages
             
-            # Store translation results
-            for lang, translated_text in zip(other_langs, translation_results):
-                redis_client.set(f"result:{lot_id}:{lang}", translated_text)
-        
-        # 3. Send webhook with complete results
-        _check_and_send_webhook_if_ready(lot_id, lot_data)
+            for lang in remaining_languages:
+                task = {
+                    "custom_id": f"tr:{lot_id}:{lang}",
+                    "text": html_en,
+                    "lang": lang,
+                    "original_lot": lot_data_with_immediate_info
+                }
+                redis_client.rpush(TRANSLATE_PENDING_QUEUE, json.dumps(task))
         
     except asyncio.TimeoutError as e:
         print(f"Timeout processing single lot {lot_data.get('lot_id')}: {e}")

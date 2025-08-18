@@ -13,6 +13,7 @@ class RequestIn(BaseModel):
     signature: str
     version: Literal["1.0.0"]
     languages: conlist(str, min_length=1)
+    language: str | None = None  # Priority language for immediate response (single lots only)
     webhook: HttpUrl
     lots: conlist(LotIn, min_length=1)
 
