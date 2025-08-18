@@ -7,7 +7,7 @@ class Image(BaseModel):
 class LotIn(BaseModel):
     lot_id: constr(strip_whitespace=True, min_length=1)
     additional_info: str | None = None
-    images: conlist(Image, min_length=1, max_length=20)
+    images: conlist(Image, min_length=1, max_length=50)
 
 class RequestIn(BaseModel):
     signature: str
@@ -33,7 +33,4 @@ class ResponseOut(BaseModel):
     lots: list[LotOut]
 
 
-class SyncResponseOut(BaseModel):
-    signature: str | None = None
-    version: str = "1.0.0"
-    lots: list[LotOut]
+# SyncResponseOut removed - all responses are now async via webhook

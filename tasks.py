@@ -3,6 +3,7 @@ from config import settings
 from jobs import vision, translate
 from delivery import post_webhook
 from openai_client import start_batch, retrieve_batch, file_client
+import openai_client
 import redis
 import json
 import asyncio
@@ -151,6 +152,76 @@ def _check_and_send_webhook_if_ready(lot_id, original_lot):
         signature = calc_signature(response_lots)
         out = ResponseOut(signature=signature, lots=response_lots).model_dump()
         post_webhook_task.delay(original_lot['webhook'], out)
+
+@celery.task(name="tasks.process_single_lot_immediately")
+def process_single_lot_immediately(lot_data: dict):
+    """Process a single lot immediately using direct OpenAI API calls (no batch)."""
+    asyncio.run(_process_single_lot_async(lot_data))
+
+async def _process_single_lot_async(lot_data: dict):
+    """Async function to process a single lot directly via OpenAI API."""
+    try:
+        # 1. Generate English description using Vision API
+        html_en = await _call_vision_direct(lot_data)
+        
+        # Store English result
+        lot_id = lot_data['lot_id']
+        redis_client.set(f"result:{lot_id}:en", html_en)
+        
+        # 2. Generate translations for other languages
+        languages = lot_data.get('languages', [])
+        other_langs = [lang for lang in languages if lang != 'en']
+        
+        if other_langs:
+            # Parallel translation requests
+            translation_tasks = [_call_translate_direct(html_en, lang) for lang in other_langs]
+            translation_results = await asyncio.gather(*translation_tasks)
+            
+            # Store translation results
+            for lang, translated_text in zip(other_langs, translation_results):
+                redis_client.set(f"result:{lot_id}:{lang}", translated_text)
+        
+        # 3. Send webhook with complete results
+        _check_and_send_webhook_if_ready(lot_id, lot_data)
+        
+    except asyncio.TimeoutError as e:
+        print(f"Timeout processing single lot {lot_data.get('lot_id')}: {e}")
+        # Send timeout error webhook
+        error_response = {
+            "lots": [{
+                "lot_id": lot_data.get('lot_id'),
+                "error": {"message": "Processing timeout - vision analysis took too long", "code": "timeout_error"}
+            }]
+        }
+        error_signature = calc_signature(error_response["lots"])
+        error_response["version"] = "1.0.0"
+        error_response["signature"] = error_signature
+        post_webhook_task.delay(lot_data.get('webhook'), error_response)
+    except Exception as e:
+        print(f"Error processing single lot {lot_data.get('lot_id')}: {e}")
+        # Send general error webhook
+        error_response = {
+            "lots": [{
+                "lot_id": lot_data.get('lot_id'),
+                "error": {"message": str(e), "code": "processing_failed"}
+            }]
+        }
+        error_signature = calc_signature(error_response["lots"])
+        error_response["version"] = "1.0.0"
+        error_response["signature"] = error_signature
+        post_webhook_task.delay(lot_data.get('webhook'), error_response)
+
+async def _call_vision_direct(lot_data: dict) -> str:
+    """Direct Vision API call for single lot."""
+    body = vision.build_vision_body_from_data(lot_data)
+    result = await openai_client.call_responses(body)
+    return parse_response_output(result)
+
+async def _call_translate_direct(text: str, lang: str) -> str:
+    """Direct Translation API call."""
+    body = translate.build_translate_body(text, lang)
+    result = await openai_client.call_responses(body)
+    return parse_response_output(result)
 
 @celery.task(name="tasks.submit_lots_for_processing")
 def submit_lots_for_processing(lots: list[dict]):
