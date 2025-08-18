@@ -18,6 +18,10 @@ TRANSLATE_PENDING_QUEUE = "translate_pending_queue"
 ACTIVE_BATCH_COUNT = "active_batch_count"
 BATCH_TO_CUSTOM_IDS = "batch_to_custom_ids"
 
+# Dynamic batching configuration
+DYNAMIC_BATCH_KEY = "dynamic_batch_last_run"
+DYNAMIC_BATCH_INTERVAL_KEY = "dynamic_batch_interval"
+
 async def _process_queue_async(queue_name: str, endpoint: str, job_type: str):
     lines_to_process = []
     custom_id_map = {}
@@ -298,23 +302,63 @@ async def _call_translate_direct(text: str, lang: str) -> str:
 @celery.task(name="tasks.submit_lots_for_processing")
 def submit_lots_for_processing(lots: list[dict]):
     for lot in lots:
-        redis_client.rpush(VISION_PENDING_QUEUE, json.dumps(lot))
+        push_to_queue(VISION_PENDING_QUEUE, lot)
+
+def _calculate_dynamic_interval(queue_depth: int) -> float:
+    """Calculate processing interval based on queue depth for dynamic batching."""
+    if queue_depth > 1000:
+        return 5.0   # High load: process every 5 seconds
+    elif queue_depth > 100:
+        return 10.0  # Medium load: process every 10 seconds
+    else:
+        return 30.0  # Low load: process every 30 seconds
 
 @celery.task(name="tasks.orchestrator_task")
 def orchestrator_task():
+    """Orchestrator with dynamic batching based on queue depth."""
+    # Calculate total queue depth for dynamic batching
+    translate_queue_depth = redis_client.llen(TRANSLATE_PENDING_QUEUE)
+    vision_queue_depth = redis_client.llen(VISION_PENDING_QUEUE)
+    total_queue_depth = translate_queue_depth + vision_queue_depth
+    
+    # Calculate dynamic interval
+    dynamic_interval = _calculate_dynamic_interval(total_queue_depth)
+    
+    # Store current interval for monitoring
+    redis_client.setex(DYNAMIC_BATCH_INTERVAL_KEY, 300, str(dynamic_interval))  # 5-minute TTL
+    
+    # Check if enough time has passed since last run (dynamic batching)
+    import time
+    current_time = time.time()
+    last_run_str = redis_client.get(DYNAMIC_BATCH_KEY)
+    last_run = float(last_run_str) if last_run_str else 0
+    
+    if current_time - last_run < dynamic_interval:
+        # Not enough time passed for dynamic interval
+        return
+    
+    # Update last run time
+    redis_client.setex(DYNAMIC_BATCH_KEY, 300, str(current_time))  # 5-minute TTL
+    
+    print(f"Dynamic batching: queue_depth={total_queue_depth}, interval={dynamic_interval}s")
+    
     active_batches = int(redis_client.get(ACTIVE_BATCH_COUNT) or 0)
     if active_batches >= settings.active_batch_limit:
+        print(f"Batch limit reached: {active_batches}/{settings.active_batch_limit}")
         return
 
-    # Все задачи теперь используют один и тот же эндпоинт
+    # All tasks use the same endpoint
     endpoint = "/v1/responses"
 
-    if redis_client.llen(TRANSLATE_PENDING_QUEUE) > 0:
+    # Prioritize translate queue for faster completion
+    if translate_queue_depth > 0:
         queue_to_process = TRANSLATE_PENDING_QUEUE
         job_type = "translate"
-    elif redis_client.llen(VISION_PENDING_QUEUE) > 0:
+        print(f"Processing translate queue: {translate_queue_depth} items")
+    elif vision_queue_depth > 0:
         queue_to_process = VISION_PENDING_QUEUE
         job_type = "vision"
+        print(f"Processing vision queue: {vision_queue_depth} items")
     else:
         return
 
@@ -322,7 +366,32 @@ def orchestrator_task():
 
 @celery.task(name="tasks.check_batch_status_task")
 def check_batch_status_task():
+    """Check batch status - runs at fixed interval since this is not queue-dependent."""
     asyncio.run(_check_batch_status_async())
+
+@celery.task(name="tasks.get_dynamic_batch_stats")
+def get_dynamic_batch_stats():
+    """Get current dynamic batching statistics for monitoring."""
+    translate_queue_depth = redis_client.llen(TRANSLATE_PENDING_QUEUE)
+    vision_queue_depth = redis_client.llen(VISION_PENDING_QUEUE)
+    total_queue_depth = translate_queue_depth + vision_queue_depth
+    
+    current_interval = redis_client.get(DYNAMIC_BATCH_INTERVAL_KEY)
+    current_interval = float(current_interval) if current_interval else 15.0
+    
+    active_batches = int(redis_client.get(ACTIVE_BATCH_COUNT) or 0)
+    
+    stats = {
+        "translate_queue_depth": translate_queue_depth,
+        "vision_queue_depth": vision_queue_depth,
+        "total_queue_depth": total_queue_depth,
+        "current_interval": current_interval,
+        "active_batches": active_batches,
+        "max_batches": settings.active_batch_limit
+    }
+    
+    print(f"Dynamic Batch Stats: {stats}")
+    return stats
 
 @celery.task(name="tasks.handle_completed_batch")
 def handle_completed_batch(batch_id: str, status: str):
