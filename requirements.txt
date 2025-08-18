@@ -4,7 +4,8 @@ pydantic
 pydantic-settings
 python-dotenv
 openai
-httpx
+httpx[http2]
 aiofiles
 celery
 redis
+h2

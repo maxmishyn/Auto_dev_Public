@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException, status
 from schemas import RequestIn, ResponseOut, LotOut, DamageDesc
-from validators import validate_images
+from validators import validate_images, cleanup_validation_client
 from jobs import vision, translate
 from delivery import post_webhook
 import openai_client
@@ -10,6 +10,11 @@ from config import settings
 from utils import parse_response_output
 
 app = FastAPI(title="Auto-Description Service")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Clean up resources on app shutdown."""
+    await cleanup_validation_client()
 
 @app.get("/")
 async def read_root() -> dict[str, str]:
