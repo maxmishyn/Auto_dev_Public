@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException, status
+from fastapi.responses import Response
 from schemas import RequestIn, ResponseOut, LotOut, DamageDesc
 from validators import validate_images, cleanup_validation_client
 from jobs import vision, translate
@@ -8,8 +9,16 @@ from tasks import submit_lots_for_processing, process_single_lot_immediately
 import asyncio
 from config import settings
 from utils import parse_response_output
+from metrics import (
+    get_metrics, get_metrics_summary, track_request, track_lot_processing,
+    track_image_validation, track_processing_time, track_image_validation_time,
+    MetricsMiddleware, CONTENT_TYPE_LATEST
+)
 
 app = FastAPI(title="Auto-Description Service")
+
+# Add metrics middleware
+app.add_middleware(MetricsMiddleware)
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -25,6 +34,17 @@ async def read_root() -> dict[str, str]:
 async def health_check() -> dict[str, str]:
     """Simple health check endpoint to verify service availability."""
     return {"status": "ok"}
+
+@app.get("/metrics")
+async def metrics_endpoint():
+    """Prometheus metrics endpoint."""
+    metrics_data = get_metrics()
+    return Response(content=metrics_data, media_type=CONTENT_TYPE_LATEST)
+
+@app.get("/metrics/summary")
+async def metrics_summary() -> dict:
+    """Human-readable metrics summary for monitoring dashboards."""
+    return get_metrics_summary()
 
 @app.post("/api/v1/generate-descriptions", status_code=201)
 async def generate_descriptions(req: RequestIn):
@@ -42,11 +62,21 @@ async def generate_descriptions(req: RequestIn):
     Results delivered via webhook in all cases.
     """
     
-    # 1. Validate image URLs
-    all_imgs = [img.url.unicode_string() for lot in req.lots for img in lot.images]
-    unreachable = await validate_images(all_imgs)
-    if unreachable and len(unreachable) / len(all_imgs) > 0.3:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "too_many_unreachable_images")
+    # Track request processing time
+    with track_processing_time("generate_descriptions"):
+        # 1. Validate image URLs
+        all_imgs = [img.url.unicode_string() for lot in req.lots for img in lot.images]
+        
+        with track_image_validation_time():
+            unreachable = await validate_images(all_imgs)
+        
+        # Track validation results
+        track_image_validation("valid", len(all_imgs) - len(unreachable))
+        track_image_validation("invalid", len(unreachable))
+        
+        if unreachable and len(unreachable) / len(all_imgs) > 0.3:
+            track_request("POST /api/v1/generate-descriptions", "validation_failed")
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "too_many_unreachable_images")
 
     # 2. Route based on lot count
     if len(req.lots) == 1:
@@ -61,6 +91,8 @@ async def generate_descriptions(req: RequestIn):
             "priority_language": req.language  # Priority language for immediate response
         }
         process_single_lot_immediately.delay(lot_data)
+        track_lot_processing("single_lot_immediate", 1)
+        track_request("POST /api/v1/generate-descriptions", "accepted_single")
         return {"status": "accepted", "message": "Single lot submitted for immediate processing"}
     
     else:
@@ -78,6 +110,8 @@ async def generate_descriptions(req: RequestIn):
             lots_data.append(lot_data)
         
         submit_lots_for_processing.delay(lots_data)
+        track_lot_processing("multi_lot_batch", len(lots_data))
+        track_request("POST /api/v1/generate-descriptions", "accepted_batch")
         return {"status": "accepted", "message": "Multiple lots submitted for batch processing"}
 
 @app.middleware("http")

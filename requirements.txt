@@ -9,3 +9,4 @@ aiofiles
 celery
 redis
 h2
+prometheus-client

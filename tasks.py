@@ -10,6 +10,10 @@ import asyncio
 from utils import parse_response_output
 from signature import calc_signature
 from schemas import LotOut, DamageDesc, ResponseOut
+from metrics import (
+    track_batch_processing_time, track_webhook, update_queue_metrics,
+    track_lot_processing
+)
 
 redis_client = redis.from_url(settings.redis_url)
 
@@ -164,6 +168,7 @@ def _send_immediate_webhook(lot_id: str, lot_data: dict, languages: list[str]):
         signature = calc_signature(response_lots)
         out = ResponseOut(signature=signature, lots=response_lots).model_dump()
         post_webhook_task.delay(lot_data['webhook'], out)
+        track_webhook("immediate")
         print(f"Sent immediate webhook for lot {lot_id} with languages: {languages}")
 
 def _send_batch_webhook(lot_id: str, original_lot: dict, batch_languages: list[str]):
@@ -273,6 +278,7 @@ async def _process_single_lot_async(lot_data: dict):
         error_response["version"] = "1.0.0"
         error_response["signature"] = error_signature
         post_webhook_task.delay(lot_data.get('webhook'), error_response)
+        track_webhook("timeout_error")
     except Exception as e:
         print(f"Error processing single lot {lot_data.get('lot_id')}: {e}")
         # Send general error webhook
@@ -341,6 +347,9 @@ def orchestrator_task():
     redis_client.setex(DYNAMIC_BATCH_KEY, 300, str(current_time))  # 5-minute TTL
     
     print(f"Dynamic batching: queue_depth={total_queue_depth}, interval={dynamic_interval}s")
+    
+    # Update metrics
+    update_queue_metrics()
     
     active_batches = int(redis_client.get(ACTIVE_BATCH_COUNT) or 0)
     if active_batches >= settings.active_batch_limit:
