@@ -35,3 +35,4 @@ Thumbs.db
 .env.*
 celerybeat-schedule*
 celerybeat.pid
+*.log

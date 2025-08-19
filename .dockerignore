@@ -1,2 +1,12 @@
-GEMINI.md
-PLAN.md
+.git
+.gitignore
+*.log
+.vscode/
+.idea/
+.DS_Store
+tests/
+test_client/
+Dockerfile
+.dockerignore
+docker-compose.yml
+*.md
